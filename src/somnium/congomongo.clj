@@ -1,4 +1,4 @@
-; Copyright (c) 2009-2012 Andrew Boekhoff, Sean Corfield
+; Copyright (c) 2009-2015 Andrew Boekhoff, Sean Corfield, Matthew Molloy
 
 ; Permission is hereby granted, free of charge, to any person obtaining a copy
 ; of this software and associated documentation files (the "Software"), to deal
@@ -18,318 +18,205 @@
 ; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 ; THE SOFTWARE.
 
-;; (ns
-;;   ^{:author "Andrew Boekhoff, Sean Corfield",
-;;     :doc "Various wrappers and utilities for the mongodb-java-driver"}
-;;   somnium.congomongo
-;;   (:require [clojure.string])
-;;   (:use     [clojure.walk :only (postwalk)]
-;;             [somnium.congomongo.config :only [*mongo-config*]]
-;;             [somnium.congomongo.coerce :only [coerce coerce-fields coerce-index-fields]])
-;;   (:import  [com.mongodb MongoClient MongoClientOptions MongoClientOptions$Builder MongoClientURI
-;;              DB DBCollection DBObject DBRef ServerAddress ReadPreference WriteConcern Bytes DBCursor]
-;;             [com.mongodb.gridfs GridFS]
-;;             [com.mongodb.util JSON]
-;;             [org.bson.types ObjectId]))
-
-(ns somnium.congomongo
+(ns
+  ^{:author "Andrew Boekhoff, Sean Corfield, Matthew Molloy",
+    :doc "Various wrappers and utilities for the mongodb-java-driver"}
+  somnium.congomongo
   (:require [clojure.string])
-  (:use [clojure.walk :only (postwalk)]))
+  (:use     [clojure.walk :only (postwalk)]
+            [somnium.congomongo.config :only [*mongo-config*]]
+            [somnium.congomongo.coerce :only [coerce coerce-fields coerce-index-fields to-edn]]))
 
+(assembly-load "MongoDB.Driver")
+(import '[MongoDB.Driver MongoServerAddress MongoClientSettings MongoUrl MongoClient
+          WriteConcern MongoDBRef CollectionOptionsDocument
+          ])
 
-;; (defprotocol StringNamed
-;;   (named [s] "convenience for interchangeably handling keywords, symbols, and strings"))
+(assembly-load "MongoDB.Bson")
+(import '[MongoDB.Bson ObjectId])
 
-;; (extend-protocol StringNamed
-;;   clojure.lang.Named
-;;   (named [s] (name s))
-;;   Object
-;;   (named [s] s))
+(defprotocol StringNamed
+  (named [s] "convenience for interchangeably handling keywords, symbols, and strings"))
 
-;; (def ^{:private true
-;;        :doc "To avoid yet another level of indirection via reflection, use
-;;              wrapper functions for field setters for each type. MongoClientOptions
-;;              only has int and boolean fields."}
-;;       type-to-setter
-;;   {:int (fn [^java.lang.reflect.Field field ^MongoClientOptions options value] (.setInt field options value))
-;;    :boolean (fn [^java.lang.reflect.Field field ^MongoClientOptions options value] (.setBoolean field options value))})
+(extend-protocol StringNamed
+  clojure.lang.Named
+  (named [s] (name s))
+  Object
+  (named [s] s))
 
-;; (defn- field->kw
-;;   "Convert camelCase identifier string to hyphen-separated keyword."
-;;   [id]
-;;   (keyword (clojure.string/replace id #"[A-Z]" #(str "-" (Character/toLowerCase ^Character (first %))))))
+(defn make-connection-uri
+  "Makes a connection with a Mongo URI, authenticating if username and password are passed."
+  [db]
+  (let [
+        mongouri (MongoUrl. db)
+        ^MongoClient client (MongoClient. mongouri)
+        db (.DatabaseName mongouri)
+        db (-> client .GetServer (.GetDatabase db))
+        ]
+    {:mongo client :db db}))
 
-;; (def ^:private builder-map
-;;   "A map from keywords to builder invocation functions."
-;;   ;; Be aware that using refelction directly here will also issue Clojure reflection warnings.
-;;   (let [is-builder-method? (fn [^java.lang.reflect.Method f]
-;;                              (let [m (.getModifiers f)]
-;;                                (and (java.lang.reflect.Modifier/isPublic m)
-;;                                     (not (java.lang.reflect.Modifier/isStatic m))
-;;                                     (= MongoClientOptions$Builder (.getReturnType f)))))
-;;         method-name (fn [^java.lang.reflect.Method f] (.getName f))
-;;         builder-call (fn [^MongoClientOptions$Builder m]
-;;                        (eval (list 'fn '[o v]
-;;                                    (list (symbol (str "." m)) 'o 'v))))
-;;         kw-fn-pair (fn [m] [(field->kw m) (builder-call m)])
-;;         method-lookups (->> (.getDeclaredMethods MongoClientOptions$Builder)
-;;                             (filter is-builder-method?)
-;;                             (map method-name)
-;;                             (map kw-fn-pair))]
-;;     (into {} method-lookups)))
+(defn make-connection
+  "Connects to a single mongo instance via db string or args.
+  db-string takes the form
 
-;; (defn mongo-options
-;;   "Return MongoClientOptions, populated by any specified options. e.g.,
-;;      (mongo-options :auto-connect-retry true)"
-;;   [& options]
-;;   (let [option-map (apply hash-map options)
-;;         builder-call (fn [b [k v]]
-;;                        (if-let [f (k builder-map)]
-;;                          (f b v)
-;;                          (throw (IllegalArgumentException.
-;;                                  (str k " is not a valid MongoClientOptions$Builder argument")))))]
-;;     (.build ^MongoClientOptions$Builder (reduce builder-call (MongoClientOptions$Builder.) option-map))))
+  mongodb://[username:password@]hostname[:port][/[database][?options]]
 
-;; (defn- make-server-address
-;;   "Convenience to make a ServerAddress without reflection warnings."
-;;   [^String host ^Integer port]
-;;   (ServerAddress. host port))
+  "
+  ([db-string]
+   (make-connection-uri db-string))
+  ([db-name & {:keys [host port] :or {host "127.0.01" port 27017}}]
+    (make-connection-uri (format "mongodb://%s:%s/%s" host port db-name))))
 
-;; (defn- make-connection-args
-;;   "Makes a connection with passed database name, host, port and MongoClientOptions"
-;;   [db args]
-;;     (let [instances (take-while #(not (instance? MongoClientOptions %)) args)
-;;           addresses (->> (if (keyword? (first instances))
-;;                            (list (apply array-map instances)) ; Handle legacy connect args
-;;                            instances)
-;;                       (map (fn [{:keys [host port] :or {host "127.0.0.1" port 27017}}]
-;;                              (make-server-address host port))))
-;;           ^MongoClientOptions options (or (first (filter #(instance? MongoClientOptions %) args)) (mongo-options))
-;;           mongo (if (> (count addresses) 1)
-;;                   (MongoClient. ^java.util.List addresses options)
-;;                   (MongoClient. ^ServerAddress (first addresses) options))
-;;           n-db (if db (.getDB mongo db) nil)]
-;;       {:mongo mongo :db n-db}))
+(defn connection?
+  "Returns truth if the argument is a map specifying an active connection."
+  [x]
+  (and (map? x)
+       (contains? x :db)
+       (:mongo x)))
 
-;; (defn- make-connection-uri
-;;   "Makes a connection with a Mongo URI, authenticating if username and password are passed"
-;;   [db]
-;;   (let [^MongoClientURI mongouri (MongoClientURI. db)
-;;         ^MongoClient client (MongoClient. mongouri)
-;;         ^String db (.getDatabase mongouri)
-;;         conn {:mongo client :db (.getDB client db)}
-;;         ^DB db (conn :db)
-;;         ^String username (.getUsername mongouri)
-;;         ^chars password (.getPassword mongouri)]
-;;     (when (and username password)
-;;       (.authenticate db username password))
-;;     conn))
+(defn get-db
+  "Returns the current connection. Throws exception if there isn't one."
+  [conn]
+  (assert (connection? conn))
+  (:db conn))
 
-;; (defn make-connection
-;;   "Connects to one or more mongo instances, returning a connection
-;; that can be used with set-connection! and with-mongo. Each instance is
-;; a map containing values for :host and/or :port.
-;;   May be called with database name and optionally:
-;;     host (default: 127.0.0.1)
-;;     port (default: 27017)
-;;     A MongoClientOptions object
-;;   A MongoClientURI string is also supported and must be prefixed with mongodb://
-;;   If username and password are specified, authenticate will be immediately
-;;   called on the connection."
-;;   ([db]
-;;     (make-connection db {}))
-;;   ([db & args]
-;;     (let [^String dbname (named db)]
-;;       (if (.startsWith dbname "mongodb://")
-;;         (make-connection-uri dbname)
-;;         (make-connection-args dbname args)))))
+(defn close-connection
+  "Closes the connection, and unsets it as the active connection if necessary."
+  [conn]
+  (assert (connection? conn))
+  (if (= conn *mongo-config*)
+    (if (thread-bound? #'*mongo-config*)
+      (set! *mongo-config* nil)
+      (alter-var-root #'*mongo-config* (constantly nil))))
+  (-> conn :mongo .GetServer .Disconnect))
 
-;; (defn connection?
-;;   "Returns truth if the argument is a map specifying an active connection."
-;;   [x]
-;;   (and (map? x)
-;;        (contains? x :db)
-;;        (:mongo x)))
+(defmacro with-mongo
+  "Makes conn the active connection in the enclosing scope.
+  When with-mongo and set-connection! interact, last one wins"
+  [conn & body]
+  `(do
+     (let [c# ~conn]
+       (assert (connection? c#))
+       (binding [*mongo-config* c#]
+         ~@body))))
 
-;; (defn ^DB get-db
-;;   "Returns the current connection. Throws exception if there isn't one."
-;;   [conn]
-;;   (assert (connection? conn))
-;;   (:db conn))
+(defmacro with-db
+  "Make dbname the active database in the enclosing scope.
+  When with-db and set-database! interact, last one wins."
+  [dbname & body]
+  `(let [db# (-> *mongo-config* :mongo .GetServer (.GetDatabase (name ~dbname)))]
+     (binding [*mongo-config* (assoc *mongo-config* :db db#)]
+       ~@body)))
 
-;; (defn close-connection
-;;   "Closes the connection, and unsets it as the active connection if necessary"
-;;   [conn]
-;;   (assert (connection? conn))
-;;   (if (= conn *mongo-config*)
-;;     (if (thread-bound? #'*mongo-config*)
-;;       (set! *mongo-config* nil)
-;;       (alter-var-root #'*mongo-config* (constantly nil))))
-;;   (.close ^MongoClient (:mongo conn)))
+(defn set-connection!
+  "Makes the connection active. Takes a connection created by make-connection.
+   When with-mongo and set-connection! interact, last one wins"
+  [connection]
+  (alter-var-root #'*mongo-config*
+                  (constantly connection)
+                  (when (thread-bound? #'*mongo-config*)
+                    (set! *mongo-config* connection))))
 
-;; (defmacro with-mongo
-;;   "Makes conn the active connection in the enclosing scope.
+;authentication is not supported after the connection has already been created in C#
+#_(defn authenticate
+  "Authenticate against either the current or a specified database connection."
+  ([conn username password]
+     (let [db (get-db conn)]
+       (when-not (.isAuthenticated db)
+         (.authenticate db
+                        ^String username
+                        (.toCharArray ^String password)))))
+  ([username password]
+     (authenticate *mongo-config* username password)))
 
-;;   When with-mongo and set-connection! interact, last one wins"
-;;   [conn & body]
-;;   `(do
-;;      (let [c# ~conn]
-;;        (assert (connection? c#))
-;;        (binding [*mongo-config* c#]
-;;          ~@body))))
+(definline get-coll
+  "Returns a DBCollection object"
+  [collection]
+  `(.GetCollection (get-db *mongo-config*)
+     ^String (named ~collection)))
 
-;; (defmacro with-db
-;;   "Make dbname the active database in the enclosing scope.
+(def write-concern-map
+  {:acknowledged         WriteConcern/Acknowledged
+   :errors-ignored       WriteConcern/Unacknowledged
+   :majority             WriteConcern/WMajority
+   :replica-acknowledged WriteConcern/W2
+   :unacknowledged       WriteConcern/Unacknowledged
+   })
 
-;;   When with-db and set-database! interact, last one wins."
-;;   [dbname & body]
-;;   `(let [^DB db# (.getDB ^MongoClient (:mongo *mongo-config*) (name ~dbname))]
-;;      (binding [*mongo-config* (assoc *mongo-config* :db db#)]
-;;        ~@body)))
+(defn set-write-concern
+  "Sets the write concern on the connection. Setting is a key in the
+  write-concern-map above."
+  [connection setting]
+  (assert (contains? write-concern-map setting))
+  (set! (-> connection :mongo .Settings .WriteConcern) (write-concern-map setting)))
 
-;; (defn set-connection!
-;;   "Makes the connection active. Takes a connection created by make-connection.
+(defn set-collection-write-concern!
+  "Sets this write concern as default for a collection."
+  [collection write-concern]
+  (if-let [concern (write-concern-map write-concern)]
+    (set! (-> collection get-coll .Settings .WriteConcern) concern)
+    (throw (Exception. (str "Unknown write concern " write-concern ".")))))
 
-;; When with-mongo and set-connection! interact, last one wins"
-;;   [connection]
-;;   (alter-var-root #'*mongo-config*
-;;                   (constantly connection)
-;;                   (when (thread-bound? #'*mongo-config*)
-;;                     (set! *mongo-config* connection))))
+(defn get-collection-write-concern
+  "Gets the currently set write concern for a collection."
+  [collection]
+  (-> collection get-coll .Settings .WriteConcern))
 
-;; (defn mongo!
-;;   "Creates a Mongo object and sets the default database.
-
-;; Does not support replica sets, and will be deprecated in future
-;; releases.  Please use 'make-connection' in combination with
-;; 'with-mongo' or 'set-connection!' instead.
-
-;;    Keyword arguments include:
-;;    :host -> defaults to localhost
-;;    :port -> defaults to 27017
-;;    :db   -> defaults to nil (you'll have to set it anyway, might as well do it now.)"
-;;   {:arglists '([:db ? :host "localhost" :port 27017])}
-;;   [& {:keys [db host port]
-;;       :or {db nil host "localhost" port 27017}}]
-;;   (set-connection! (make-connection db :host host :port port))
-;;   true)
-
-;; (defn authenticate
-;;   "Authenticate against either the current or a specified database connection."
-;;   ([conn username password]
-;;      (let [db (get-db conn)]
-;;        (when-not (.isAuthenticated db)
-;;          (.authenticate db
-;;                         ^String username
-;;                         (.toCharArray ^String password)))))
-;;   ([username password]
-;;      (authenticate *mongo-config* username password)))
-
-;; (definline ^DBCollection get-coll
-;;   "Returns a DBCollection object"
-;;   [collection]
-;;   `(.getCollection (get-db *mongo-config*)
-;;      ^String (named ~collection)))
-
-;; (def write-concern-map
-;;   {:acknowledged         WriteConcern/ACKNOWLEDGED
-;;    :errors-ignored       WriteConcern/ERRORS_IGNORED
-;;    :fsynced              WriteConcern/FSYNCED
-;;    :journaled            WriteConcern/JOURNALED
-;;    :majority             WriteConcern/MAJORITY
-;;    :replica-acknowledged WriteConcern/REPLICA_ACKNOWLEDGED
-;;    :unacknowledged       WriteConcern/UNACKNOWLEDGED
-;;    ;; these are pre-2.10.x names for write concern:
-;;    :fsync-safe    WriteConcern/FSYNC_SAFE  ;; deprecated - use :fsynced
-;;    :journal-safe  WriteConcern/JOURNAL_SAFE ;; deprecated - use :journaled
-;;    :none          WriteConcern/NONE ;; deprecated - use :errors-ignored
-;;    :normal        WriteConcern/NORMAL ;; deprecated - use :unacknowledged
-;;    :replicas-safe WriteConcern/REPLICAS_SAFE ;; deprecated - use :replica-acknowledged
-;;    :safe          WriteConcern/SAFE ;; deprecated - use :acknowledged
-;;    ;; these are left for backward compatibility but are deprecated:
-;;    :replica-safe WriteConcern/REPLICAS_SAFE
-;;    :strict       WriteConcern/SAFE
-;;    })
-
-;; (defn set-write-concern
-;;   "Sets the write concern on the connection. Setting is a key in the
-;;   write-concern-map above."
-;;   [connection setting]
-;;   (assert (contains? (set (keys write-concern-map)) setting))
-;;   (.setWriteConcern (get-db connection)
-;;                     ^WriteConcern (get write-concern-map setting)))
-
-;; (defn set-collection-write-concern!
-;;   "Sets this write concern as default for a collection."
-;;   [collection write-concern]
-;;   (if-let [concern (get write-concern-map write-concern)]
-;;     (.setWriteConcern (get-coll collection) concern)
-;;     (throw (IllegalArgumentException. (str "Unknown write concern " write-concern ".")))))
-
-;; (defn get-collection-write-concern
-;;   "Gets the currently set write concern for a collection."
-;;   [collection]
-;;     (.getWriteConcern (get-coll collection)))
-
-;; (defn- illegal-write-concern
-;;   [write-concern]
-;;   (throw (IllegalArgumentException. (str write-concern " is not a valid WriteConcern alias"))))
+(defn- illegal-write-concern
+  [write-concern]
+  (throw (Exception. (str write-concern " is not a valid WriteConcern alias"))))
 
 ;; ;; add some convenience fns for manipulating object-ids
-;; (definline object-id ^ObjectId [^String s]
-;;   `(ObjectId. ~s))
+(definline object-id ^ObjectId [^String s]
+  `(ObjectId. ~s))
 
-;; ;; Make ObjectIds printable under *print-dup*, hiding the
-;; ;; implementation-dependent ObjectId class
-;; (defmethod print-dup ObjectId [^ObjectId x ^java.io.Writer w]
-;;   (.write w (str "#=" `(object-id ~(.toString x)))))
+(defn get-timestamp
+  "Pulls the timestamp from an ObjectId or a map with a valid ObjectId in :_id."
+  [obj]
+  (when-let [^ObjectId id (if (instance? ObjectId obj) obj (:_id obj))]
+    (.Timestamp id)))
 
-;; (defn get-timestamp
-;;   "Pulls the timestamp from an ObjectId or a map with a valid ObjectId in :_id."
-;;   [obj]
-;;   (when-let [^ObjectId id (if (instance? ObjectId obj) obj (:_id obj))]
-;;     (.getTime id)))
+(defn db-ref
+  "Convenience DBRef constructor."
+  [ns id]
+  (MongoDBRef. (get-db *mongo-config*)
+          ^String (named ns)
+          ^BsonValue id))
 
-;; (defn db-ref
-;;   "Convenience DBRef constructor."
-;;   [ns id]
-;;   (DBRef. (get-db *mongo-config*)
-;;           ^String (named ns)
-;;           ^Object id))
+(defn db-ref? [x]
+  (instance? MongoDBRef x))
 
-;; (defn db-ref? [x]
-;;   (instance? DBRef x))
+(defn collection-exists?
+  "Query whether the named collection has been created within the DB."
+  [collection]
+  (.CollectionExists (get-db *mongo-config*)
+                     ^String (named collection)))
 
-;; (defn collection-exists?
-;;   "Query whether the named collection has been created within the DB."
-;;   [collection]
-;;   (.collectionExists (get-db *mongo-config*)
-;;                      ^String (named collection)))
+(defn create-collection!
+  "Explicitly create a collection with the given name, which must not already exist.
 
-;; (defn create-collection!
-;;   "Explicitly create a collection with the given name, which must not already exist.
+   Most users will not need this function, and will instead allow
+   MongoDB to implicitly create collections when they are written
+   to. This function exists primarily to allow the creation of capped
+   collections, and so supports the following keyword arguments:
 
-;;    Most users will not need this function, and will instead allow
-;;    MongoDB to implicitly create collections when they are written
-;;    to. This function exists primarily to allow the creation of capped
-;;    collections, and so supports the following keyword arguments:
+   :capped -> boolean: if the collection is capped
+   :size   -> int: collection size (in bytes)
+   :max    -> int: max number of documents."
+  {:arglists
+   '([collection :capped :size :max])}
+  ([collection & {:keys [capped size max] :as options}]
+     (.CreateCollection (get-db *mongo-config*)
+                        ^String (named collection)
+                        (CollectionOptionsDocument.
+                          (coerce options [:clojure :mongo])))))
 
-;;    :capped -> boolean: if the collection is capped
-;;    :size   -> int: collection size (in bytes)
-;;    :max    -> int: max number of documents."
-;;   {:arglists
-;;    '([collection :capped :size :max])}
-;;   ([collection & {:keys [capped size max] :as options}]
-;;      (.createCollection (get-db *mongo-config*)
-;;                         ^String (named collection)
-;;                         (coerce options [:clojure :mongo]))))
-
-;; (def query-option-map
-;;   {:tailable    Bytes/QUERYOPTION_TAILABLE
-;;    :slaveok     Bytes/QUERYOPTION_SLAVEOK
-;;    :oplogreplay Bytes/QUERYOPTION_OPLOGREPLAY
-;;    :notimeout   Bytes/QUERYOPTION_NOTIMEOUT
-;;    :awaitdata   Bytes/QUERYOPTION_AWAITDATA})
+#_(def query-option-map
+  {:tailable    Bytes/QUERYOPTION_TAILABLE
+   :slaveok     Bytes/QUERYOPTION_SLAVEOK
+   :oplogreplay Bytes/QUERYOPTION_OPLOGREPLAY
+   :notimeout   Bytes/QUERYOPTION_NOTIMEOUT
+   :awaitdata   Bytes/QUERYOPTION_AWAITDATA})
 
 ;; (defn calculate-query-options
 ;;   "Calculates the cursor's query option from a list of options"

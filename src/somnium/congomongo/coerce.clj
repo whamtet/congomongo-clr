@@ -108,12 +108,13 @@
   (clojure->mongo [o] (BsonInt64. o))
   )
 
-
+(def to-json #(BsonExtensionMethods/ToJson % (class %)))
+(def to-edn #(-> % to-json read-str))
 
 (let [translations {[:clojure :mongo  ] clojure->mongo
                     [:clojure :json   ] write-str
                     [:mongo   :clojure] #(mongo->clojure % *keywordize*)
-                    [:mongo   :json   ] #(BsonExtensionMethods/ToJson % (class %))
+                    [:mongo   :json   ] to-json
                     [:json    :clojure] #(read-str % :key-fn (if *keywordize*
                                                                keyword
                                                                identity))
@@ -162,12 +163,12 @@
                                               f
                                               [f 1]))))))
 
-;; (defn ^DBObject coerce-index-fields
-;;   "Used for creating index specifications.
-;;    Deprecated as of 0.3.3.
-;;    [:a :b :c] => (array-map :a 1 :b 1 :c 1)
-;;    [:a [:b 1] :c] => (array-map :a 1 :b -1 :c 1)
+(defn coerce-index-fields
+  "Used for creating index specifications.
+   Deprecated as of 0.3.3.
+   [:a :b :c] => (array-map :a 1 :b 1 :c 1)
+   [:a [:b 1] :c] => (array-map :a 1 :b -1 :c 1)
 
-;;    See also somnium.congomongo/add-index!"
-;;   [fields]
-;;   (coerce-ordered-fields fields))
+   See also somnium.congomongo/add-index!"
+  [fields]
+  (coerce-ordered-fields fields))
