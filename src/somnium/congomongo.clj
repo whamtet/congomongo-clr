@@ -117,18 +117,6 @@
                   (when (thread-bound? #'*mongo-config*)
                     (set! *mongo-config* connection))))
 
-;authentication is not supported after the connection has already been created in C#
-#_(defn authenticate
-  "Authenticate against either the current or a specified database connection."
-  ([conn username password]
-     (let [db (get-db conn)]
-       (when-not (.isAuthenticated db)
-         (.authenticate db
-                        ^String username
-                        (.toCharArray ^String password)))))
-  ([username password]
-     (authenticate *mongo-config* username password)))
-
 (definline get-coll
   "Returns a DBCollection object"
   [collection]
@@ -214,8 +202,6 @@
 (def query-option-map
   {:tailable    QueryFlags/TailableCursor
    :slaveok     QueryFlags/SlaveOk
-;   :oplogreplay Bytes/QUERYOPTION_OPLOGREPLAY
-   ;TODO - ABOVE??
    :notimeout   QueryFlags/NoCursorTimeout
    :awaitdata   QueryFlags/AwaitData})
 
@@ -226,105 +212,62 @@
                                             (list options)
                                             options))))
 
-#_(def ^:private read-preference-map
-  "Private map of factory functions of ReadPreferences to aliases."
-  {:nearest (fn nearest ([] (ReadPreference/nearest)) ([first-tag remaining-tags] (ReadPreference/nearest first-tag remaining-tags)))
-   :primary (fn primary ([] (ReadPreference/primary)) ([_ _] (throw (IllegalArgumentException. "Read preference :primary does not accept tag sets."))))
-   :primary-preferred (fn primary-preferred ([] (ReadPreference/primaryPreferred)) ([first-tag remaining-tags] (ReadPreference/primaryPreferred first-tag remaining-tags)))
-   :secondary (fn secondary ([] (ReadPreference/secondary)) ([first-tag remaining-tags] (ReadPreference/secondary first-tag remaining-tags)))
-   :secondary-preferred (fn secondary-preferred ([] (ReadPreference/secondaryPreferred)) ([first-tag remaining-tags] (ReadPreference/secondaryPreferred first-tag remaining-tags)))})
+;read preferences not implemented in c#
 
-;; (defn read-preference
-;;   "Creates a ReadPreference from an alias and optional tag sets. Valid aliases are :nearest,
-;;    :primary, :primary-preferred, :secondary and :secondary-preferred."
-;;   {:arglists '([preference {:first-tag "value"} {:other-tag-set "other-value"}])}
-;;   [preference & tags]
-;;   (if-let [pref-factory (get read-preference-map preference)]
-;;     (if (empty? tags)
-;;       (pref-factory)
-;;       (pref-factory
-;;         (coerce (first tags) [:clojure :mongo ])
-;;         (into-array com.mongodb.DBObject (coerce (rest tags) [:clojure :mongo ] :many true)))
-;;       )
-;;     (throw (IllegalArgumentException. (str preference " is not a valid ReadPreference alias.")))))
-
-;; (defn set-read-preference
-;;   "Sets the read preference on the connection (you may supply a ReadPreference or a valid alias)."
-;;   [connection preference]
-;;   (let [p (if (instance? ReadPreference preference)
-;;             preference
-;;             (read-preference preference))]
-;;     (.setReadPreference (get-db connection) ^ReadPreference p)))
-
-;; (defn set-collection-read-preference!
-;;   "Sets the read preference as default for a collection."
-;;   [collection preference & opts]
-;;   (let [pref (apply read-preference preference opts)]
-;;     (.setReadPreference (get-coll collection) pref)
-;;     pref))
-
-;; (defn get-collection-read-preference
-;;   "Returns the currently set read preference for a collection"
-;;   [collection]
-;;   (.getReadPreference (get-coll collection)))
-
-;; (defn fetch
-;;   "Fetches objects from a collection.
-;;    Note that MongoDB always adds the _id and _ns
-;;    fields to objects returned from the database.
-;;    Optional arguments include
-;;    :where    -> takes a query map
-;;    :only     -> takes an array of keys to retrieve
-;;    :as       -> what to return, defaults to :clojure, can also be :json or :mongo
-;;    :from     -> argument type, same options as above
-;;    :skip     -> number of records to skip
-;;    :limit    -> number of records to return
-;;    :one?     -> defaults to false, use fetch-one as a shortcut
-;;    :count?   -> defaults to false, use fetch-count as a shortcut
-;;    :explain? -> returns performance information on the query, instead of rows
-;;    :sort     -> sort the results by a specific key
-;;    :options  -> query options [:tailable :slaveok :oplogreplay :notimeout :awaitdata]
-;;    :read-preferences -> read preferences (e.g. :primary or ReadPreference instance)"
-;;   {:arglists
-;;    '([collection :where :only :limit :skip :as :from :one? :count? :sort :explain? :options :read-preferences])}
-;;   [coll & {:keys [where only as from one? count? limit skip sort options explain? read-preferences]
-;;            :or {where {} only [] as :clojure from :clojure
-;;                 one? false count? false limit 0 skip 0 sort nil options [] explain? false}}]
-;;   (when (and one? sort)
-;;     (throw (IllegalArgumentException. "Fetch :one? (or fetch-one) can't be used with :sort.
-;; You should use fetch with :limit 1 instead."))); one? and sort should NEVER be called together
-;;   (let [n-where (coerce where [from :mongo])
-;;         n-only  (coerce-fields only)
-;;         n-col   (get-coll coll)
-;;         n-limit (if limit (- 0 (Math/abs (long limit))) 0)
-;;         n-sort (when sort (coerce sort [from :mongo]))
-;;         n-options (calculate-query-options options)
-;;         n-preferences (cond
-;;                         (nil? read-preferences) nil
-;;                         (instance? ReadPreference read-preferences) read-preferences
-;;                         :else (somnium.congomongo/read-preference read-preferences))]
-;;     (cond
-;;       count? (.getCount n-col n-where n-only)
-;;       one?   (if-let [m (.findOne
-;;                          ^DBCollection n-col
-;;                          ^DBObject n-where
-;;                          ^DBObject n-only)]
-;;                (coerce m [:mongo as]) nil)
-;;       :else  (when-let [cursor (DBCursor. ^DBCollection n-col
-;;                                       ^DBObject n-where
-;;                                       ^DBObject n-only
-;;                                       ^ReadPreference n-preferences)]
-;;                (when n-options
-;;                  (.setOptions cursor n-options))
-;;                (when n-sort
-;;                  (.sort cursor n-sort))
-;;                (when skip
-;;                  (.skip cursor skip))
-;;                (when n-limit
-;;                  (.limit cursor n-limit))
-;;                (if explain?
-;;                  (coerce (.explain cursor) [:mongo as] :many false)
-;;                  (coerce cursor [:mongo as] :many true))))))
+#_(defn fetch
+  "Fetches objects from a collection.
+   Note that MongoDB always adds the _id and _ns
+   fields to objects returned from the database.
+   Optional arguments include
+   :where    -> takes a query map
+   :only     -> takes an array of keys to retrieve
+   :as       -> what to return, defaults to :clojure, can also be :json or :mongo
+   :from     -> argument type, same options as above
+   :skip     -> number of records to skip
+   :limit    -> number of records to return
+   :one?     -> defaults to false, use fetch-one as a shortcut
+   :count?   -> defaults to false, use fetch-count as a shortcut
+   :explain? -> returns performance information on the query, instead of rows
+   :sort     -> sort the results by a specific key
+   :options  -> query options [:tailable :slaveok :notimeout :awaitdata]
+   "
+  {:arglists
+   '([collection :where :only :limit :skip :as :from :one? :count? :sort :explain? :options])}
+  [coll & {:keys [where only as from one? count? limit skip sort options explain?]
+           :or {where {} only [] as :clojure from :clojure
+                one? false count? false limit 0 skip 0 sort nil options [] explain? false}}]
+  (when (and one? sort)
+    (throw (Exception. "Fetch :one? (or fetch-one) can't be used with :sort.
+You should use fetch with :limit 1 instead.")))
+  (let [n-where (coerce where [from :mongo])
+        n-only  (coerce-fields only)
+        n-col   (get-coll coll)
+        n-limit (if limit (- 0 (Math/Abs (long limit))) 0)
+        n-sort (when sort (coerce sort [from :mongo]))
+        n-options (calculate-query-options options)
+        ]
+    (cond
+      count? (.Count n-col n-where n-only)
+      one?   (if-let [m (.findOne
+                         ^DBCollection n-col
+                         ^DBObject n-where
+                         ^DBObject n-only)]
+               (coerce m [:mongo as]) nil)
+      :else  (when-let [cursor (DBCursor. ^DBCollection n-col
+                                      ^DBObject n-where
+                                      ^DBObject n-only
+                                      ^ReadPreference n-preferences)]
+               (when n-options
+                 (.setOptions cursor n-options))
+               (when n-sort
+                 (.sort cursor n-sort))
+               (when skip
+                 (.skip cursor skip))
+               (when n-limit
+                 (.limit cursor n-limit))
+               (if explain?
+                 (coerce (.explain cursor) [:mongo as] :many false)
+                 (coerce cursor [:mongo as] :many true))))))
 
 ;; (defn fetch-one [col & options]
 ;;   (apply fetch col (concat options '[:one? true])))
