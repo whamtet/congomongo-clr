@@ -1,9 +1,12 @@
-CongoMongo <a href="http://travis-ci.org/#!/seancorfield/congomongo/builds"><img src="https://secure.travis-ci.org/seancorfield/congomongo.png" /></a>
+CongoMongo CLR
 ===========
 
 What?
 ------
-A toolkit for using MongoDB with Clojure.
+A toolkit for using MongoDB with ClojureCLR.  This is a port of [CongoMongo](https://github.com/aboekhoff/congomongo) to ClojureCLR.
+
+Original Documentation
+----------------------
 
 For Clojure 1.2.1 and earlier, use CongoMongo 0.2.3 or earlier. CongoMongo 0.2.3 is the last release that will support Clojure 1.2.x. CongoMongo 0.3.0 onward no longer supports Clojure 1.2.x.
 

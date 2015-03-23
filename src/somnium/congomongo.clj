@@ -29,7 +29,7 @@
 
 (assembly-load "MongoDB.Driver")
 (import '[MongoDB.Driver MongoServerAddress MongoClientSettings MongoUrl MongoClient
-          WriteConcern MongoDBRef CollectionOptionsDocument
+          WriteConcern MongoDBRef CollectionOptionsDocument QueryFlags
           ])
 
 (assembly-load "MongoDB.Bson")
@@ -211,27 +211,28 @@
                         (CollectionOptionsDocument.
                           (coerce options [:clojure :mongo])))))
 
-#_(def query-option-map
-  {:tailable    Bytes/QUERYOPTION_TAILABLE
-   :slaveok     Bytes/QUERYOPTION_SLAVEOK
-   :oplogreplay Bytes/QUERYOPTION_OPLOGREPLAY
-   :notimeout   Bytes/QUERYOPTION_NOTIMEOUT
-   :awaitdata   Bytes/QUERYOPTION_AWAITDATA})
+(def query-option-map
+  {:tailable    QueryFlags/TailableCursor
+   :slaveok     QueryFlags/SlaveOk
+;   :oplogreplay Bytes/QUERYOPTION_OPLOGREPLAY
+   ;TODO - ABOVE??
+   :notimeout   QueryFlags/NoCursorTimeout
+   :awaitdata   QueryFlags/AwaitData})
 
-;; (defn calculate-query-options
-;;   "Calculates the cursor's query option from a list of options"
-;;    [options]
-;;    (reduce bit-or 0 (map query-option-map (if (keyword? options)
-;;                                             (list options)
-;;                                             options))))
+(defn calculate-query-options
+  "Calculates the cursor's query option from a list of options"
+   [options]
+   (reduce bit-or 0 (map query-option-map (if (keyword? options)
+                                            (list options)
+                                            options))))
 
-;; (def ^:private read-preference-map
-;;   "Private map of facory functions of ReadPreferences to aliases."
-;;   {:nearest (fn nearest ([] (ReadPreference/nearest)) ([first-tag remaining-tags] (ReadPreference/nearest first-tag remaining-tags)))
-;;    :primary (fn primary ([] (ReadPreference/primary)) ([_ _] (throw (IllegalArgumentException. "Read preference :primary does not accept tag sets."))))
-;;    :primary-preferred (fn primary-preferred ([] (ReadPreference/primaryPreferred)) ([first-tag remaining-tags] (ReadPreference/primaryPreferred first-tag remaining-tags)))
-;;    :secondary (fn secondary ([] (ReadPreference/secondary)) ([first-tag remaining-tags] (ReadPreference/secondary first-tag remaining-tags)))
-;;    :secondary-preferred (fn secondary-preferred ([] (ReadPreference/secondaryPreferred)) ([first-tag remaining-tags] (ReadPreference/secondaryPreferred first-tag remaining-tags)))})
+#_(def ^:private read-preference-map
+  "Private map of factory functions of ReadPreferences to aliases."
+  {:nearest (fn nearest ([] (ReadPreference/nearest)) ([first-tag remaining-tags] (ReadPreference/nearest first-tag remaining-tags)))
+   :primary (fn primary ([] (ReadPreference/primary)) ([_ _] (throw (IllegalArgumentException. "Read preference :primary does not accept tag sets."))))
+   :primary-preferred (fn primary-preferred ([] (ReadPreference/primaryPreferred)) ([first-tag remaining-tags] (ReadPreference/primaryPreferred first-tag remaining-tags)))
+   :secondary (fn secondary ([] (ReadPreference/secondary)) ([first-tag remaining-tags] (ReadPreference/secondary first-tag remaining-tags)))
+   :secondary-preferred (fn secondary-preferred ([] (ReadPreference/secondaryPreferred)) ([first-tag remaining-tags] (ReadPreference/secondaryPreferred first-tag remaining-tags)))})
 
 ;; (defn read-preference
 ;;   "Creates a ReadPreference from an alias and optional tag sets. Valid aliases are :nearest,
